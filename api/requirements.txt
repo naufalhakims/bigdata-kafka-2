@@ -1,0 +1,3 @@
+Flask
+pyspark
+pandas # Jika Anda memutuskan untuk tidak menggunakan Spark di API dan membaca Parquet dengan Pandas

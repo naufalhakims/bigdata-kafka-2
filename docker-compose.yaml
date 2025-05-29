@@ -1,0 +1,91 @@
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.2 # Gunakan versi yang stabil
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - food_network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.3.2 # Gunakan versi yang stabil
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+      - "29092:29092" # Port untuk koneksi dari luar Docker network jika perlu
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1 # For Confluent images
+      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1 # For Confluent images
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1             # For Confluent images
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1  # For Confluent images
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock # Opsional, tergantung image Kafka
+    networks:
+      - food_network
+
+  kafka_producer:
+    build: ./kafka_producer
+    container_name: kafka_producer_app
+    depends_on:
+      - kafka
+    volumes:
+      - ./data:/app/data # Mount direktori data agar producer bisa baca CSV awal
+    networks:
+      - food_network
+    # Producer akan exit setelah selesai, jadi tidak perlu restart policy yang agresif
+    # restart: on-failure 
+
+  kafka_consumer:
+    build: ./kafka_consumer
+    container_name: kafka_consumer_app
+    depends_on:
+      - kafka
+      - kafka_producer # Mulai setelah producer (meskipun producer mungkin sudah selesai)
+    volumes:
+      - ./data:/app/data # Mount direktori data agar consumer bisa tulis batch
+    networks:
+      - food_network
+    # restart: on-failure # Consumer bisa restart jika gagal
+
+  spark_processor:
+    build: ./spark_processor
+    container_name: spark_processor_app
+    depends_on:
+      - kafka_consumer # Proses setelah consumer selesai (atau setidaknya menghasilkan beberapa data)
+    volumes:
+      - ./data:/app/data # Mount direktori data agar Spark bisa baca batch & tulis processed data
+    networks:
+      - food_network
+    # Spark processor adalah job, akan exit setelah selesai.
+    # Tidak perlu restart kecuali Anda ingin ia dijalankan ulang secara otomatis pada kegagalan.
+
+  api:
+    build: ./api
+    container_name: food_api_app
+    ports:
+      - "5000:5000"
+    depends_on:
+      - spark_processor # API sebaiknya dimulai setelah data diproses
+    volumes:
+      - ./data:/app/data # Mount direktori data agar API bisa baca processed Parquet
+    networks:
+      - food_network
+    restart: unless-stopped
+
+networks:
+  food_network:
+    driver: bridge
+
+volumes:
+  data_volume: # Jika Anda ingin menggunakan named volume, tapi binding mount lebih mudah untuk setup ini
