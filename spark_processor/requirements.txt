@@ -1,2 +1,0 @@
-pyspark
-pandas # Untuk kemudahan membaca CSV jika diperlukan, meskipun Spark bisa baca langsung
