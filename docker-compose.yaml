@@ -1,91 +1,70 @@
+version: '3.8'
+
+networks:
+  kafka-net:
+    driver: bridge
+
 services:
   zookeeper:
-    image: confluentinc/cp-zookeeper:7.3.2 # Gunakan versi yang stabil
+    image: wurstmeister/zookeeper:latest
     container_name: zookeeper
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
     networks:
-      - food_network
+      - kafka-net
 
   kafka:
-    image: confluentinc/cp-kafka:7.3.2 # Gunakan versi yang stabil
+    image: wurstmeister/kafka:latest
     container_name: kafka
-    depends_on:
-      - zookeeper
     ports:
       - "9092:9092"
-      - "29092:29092" # Port untuk koneksi dari luar Docker network jika perlu
     environment:
-      KAFKA_BROKER_ID: 1
-      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:9093,PLAINTEXT_EXTERNAL://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:9093,PLAINTEXT_EXTERNAL://0.0.0.0:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_CONFLUENT_LICENSE_TOPIC_REPLICATION_FACTOR: 1 # For Confluent images
-      KAFKA_CONFLUENT_BALANCER_TOPIC_REPLICATION_FACTOR: 1 # For Confluent images
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1             # For Confluent images
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1  # For Confluent images
+      KAFKA_CREATE_TOPICS: "food-data-topic:1:1" # Automatically create the topic
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock # Opsional, tergantung image Kafka
-    networks:
-      - food_network
-
-  kafka_producer:
-    build: ./kafka_producer
-    container_name: kafka_producer_app
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
-      - kafka
-    volumes:
-      - ./data:/app/data # Mount direktori data agar producer bisa baca CSV awal
+      - zookeeper
     networks:
-      - food_network
-    # Producer akan exit setelah selesai, jadi tidak perlu restart policy yang agresif
-    # restart: on-failure 
+      - kafka-net
 
-  kafka_consumer:
-    build: ./kafka_consumer
-    container_name: kafka_consumer_app
+  pyspark-app-trainer: # Renamed for clarity
+    build:
+      context: ./pyspark_app
+    container_name: pyspark-app-trainer
     depends_on:
-      - kafka
-      - kafka_producer # Mulai setelah producer (meskipun producer mungkin sudah selesai)
-    volumes:
-      - ./data:/app/data # Mount direktori data agar consumer bisa tulis batch
+      - kafka # Depends on Kafka mainly to ensure network is up, not direct consumption
     networks:
-      - food_network
-    # restart: on-failure # Consumer bisa restart jika gagal
-
-  spark_processor:
-    build: ./spark_processor
-    container_name: spark_processor_app
-    depends_on:
-      - kafka_consumer # Proses setelah consumer selesai (atau setidaknya menghasilkan beberapa data)
+      - kafka-net
     volumes:
-      - ./data:/app/data # Mount direktori data agar Spark bisa baca batch & tulis processed data
-    networks:
-      - food_network
-    # Spark processor adalah job, akan exit setelah selesai.
-    # Tidak perlu restart kecuali Anda ingin ia dijalankan ulang secara otomatis pada kegagalan.
+      - ./data:/app/data # Mount local data dir to /app/data in container
+    command: >
+      spark-submit
+      --master local[*]
+      /app/spark_model_trainer.py
+    # This service will run to completion and then exit.
+    # Use `docker-compose up pyspark-app-trainer` to run it.
+    # Or add restart: on-failure if you want it to retry.
+    # For this task, it's a one-off training run after data is batched.
 
-  api:
-    build: ./api
-    container_name: food_api_app
+  api-server:
+    build:
+      context: ./api_server
+    container_name: api-server
     ports:
-      - "5000:5000"
+      - "5001:5000" # Expose API on host port 5001
     depends_on:
-      - spark_processor # API sebaiknya dimulai setelah data diproses
-    volumes:
-      - ./data:/app/data # Mount direktori data agar API bisa baca processed Parquet
+      - pyspark-app-trainer # Optional: wait for trainer to finish if running all at once
+                           # More practically, you run trainer, then separately start API
     networks:
-      - food_network
-    restart: unless-stopped
-
-networks:
-  food_network:
-    driver: bridge
-
-volumes:
-  data_volume: # Jika Anda ingin menggunakan named volume, tapi binding mount lebih mudah untuk setup ini
+      - kafka-net # May not be strictly needed if not talking to kafka, but good for consistency
+    volumes:
+      - ./data/models:/app/models:ro # Mount models read-only
+    environment:
+      - MODELS_DIR=/app/models
+    # restart: always # If you want the API to always be running
